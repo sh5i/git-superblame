@@ -89,7 +89,6 @@ module SuperBlame
       IO.popen(@env, ["git", "--no-pager", "blame", "--porcelain", "--", file, commit]) do |pin|
         current = nil
         pin.each_line do |line|
-          line.chomp!
           case line
           when /^([0-9a-f]{40}) (\d+) (\d+) (\d+)/ # commit, line-orig, line-current, next-start
             commits[$1] ||= { :id => $1 }
@@ -141,8 +140,17 @@ module SuperBlame
       git_mktree(entries)
     end
 
-    def extract_tracespec(file)
+    def extract_tracespec_from_git_log(file)
       git_log(file).select {|c| [:rename, :copy].include?(c[:type]) }
+    end
+
+    def parse_tracespec(file)
+      File.open(file, "r") do |f|
+        return f.each_line.map do |line|
+          commit, file, commit_orig, file_orig = line.chomp.split(/:/)
+          { :commit => commit, :file => file, :commit_orig => commit_orig, :file_orig => file_orig }
+        end
+      end
     end
 
     def find_blob_id(commit, path)
@@ -150,7 +158,8 @@ module SuperBlame
     end
 
     def superblame(file, rev, tracespec=nil)
-      tracespec ||= extract_tracespec(file)
+      tracespec ||= extract_tracespec_from_git_log(file)
+      #tracespec.each {|s| p spec }
       superblame_sub(file, rev, tracespec).each do |line|
         orig_annotation = line[:commit_orig] ? line[:commit_orig][:id][0, 7] + " ->" : "          "
         puts "#{orig_annotation} #{line[:commit][:id][0, 7]} #{line[:body]}"
@@ -175,7 +184,8 @@ module SuperBlame
   end
 end
 
-orig_repo, file, rev = *ARGV
+orig_repo, file, rev, tracespec = *ARGV
 SuperBlame::Repo.new(orig_repo).clone do |repo|
-  repo.superblame(file, rev)
+  tracespec &&= repo.parse_tracespec(tracespec)
+  repo.superblame(file, rev, tracespec)
 end
