@@ -60,7 +60,6 @@ module SuperBlame
     end
 
     FOLLOW = %w[--follow -M -C --find-copies-harder]
-
     def git_log(file)
       result = []
       IO.popen(@env, ["git", "--no-pager", "log", "--format=%H %P", "--name-status", *FOLLOW, "--", file]) do |pin|
@@ -78,6 +77,29 @@ module SuperBlame
             result[-1].merge!({ :type => :rename, :sim => $1.to_i, :file => $3, :orig_file => $2 })
           when /^C(\d+)\t(.+)\t(.+)/ # copy
             result[-1].merge!({ :type => :copy, :sim => $1.to_i, :file => $3, :orig_file => $2 })
+          end
+        end
+      end
+      result
+    end
+
+    def git_blame(file, commit)
+      result = []
+      commits = {}
+      IO.popen(@env, ["git", "--no-pager", "blame", "--porcelain", "--", file, commit]) do |pin|
+        current = nil
+        pin.each_line do |line|
+          line.chomp!
+          case line
+          when /^([0-9a-f]{40}) (\d+) (\d+) (\d+)/ # commit, line-orig, line-current, next-start
+            commits[$1] ||= { :id => $1 }
+            current = { :commit => commits[$1], :line_orig => $2.to_i, :line_current => $3.to_i }
+          when /^([-a-z]+) (.*)/ # attribute
+            current[:commit][$1] = $2
+          when /^\t(.*)/ # line
+            current[:body] = $1
+            result << current.dup
+            current[:line_current] += 1
           end
         end
       end
@@ -128,5 +150,6 @@ end
 
 orig_repo = ARGV.shift
 SuperBlame::Repo.new(orig_repo).clone do |repo|
-  repo.extract_tracespec(ARGV.shift).each {|e| p e }
+  #repo.extract_tracespec(ARGV.shift).each {|e| p e }
+  repo.git_blame(ARGV.shift, ARGV.shift).each {|e| p e }
 end
