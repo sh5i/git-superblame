@@ -33,8 +33,8 @@ module SuperBlame
       end
     end
     
-    def git_ls_tree(tree)
-      IO.popen(@env, ["git", "ls-tree", "-z", tree], "r") do |pin|
+    def git_ls_tree(*tree)
+      IO.popen(@env, ["git", "ls-tree", "-z", *tree], "r") do |pin|
         return pin.each_line("\0").map do |line|
           # <mode> SP <type> SP <object> TAB <file>
           m = line.chomp("\0").match(/^(?<mode>\w+) (?<type>\w+) (?<id>\w+)\t(?<name>.*)/m)
@@ -66,17 +66,17 @@ module SuperBlame
         pin.each_line do |line|
           case line
           when /^([0-9a-f]+) ([0-9a-f]+)/ # %H:commit hash, %P:parent hashes
-            result << { :commit => $1, :orig_commit => $2 }
+            result << { :commit => $1, :commit_orig => $2 }
           when /^A\t(.+)/ # add
             result[-1].merge!({ :type => :add, :file => $1 })
           when /^D\t(.+)/ # delete
-            result[-1].merge!({ :type => :delete, :orig_file => $1 })
+            result[-1].merge!({ :type => :delete, :file_orig => $1 })
           when /^M\t(.+)/ # modify
             result[-1].merge!({ :type => :modify, :file => $1 })
           when /^R(\d+)\t(.+)\t(.+)/ # rename
-            result[-1].merge!({ :type => :rename, :sim => $1.to_i, :file => $3, :orig_file => $2 })
+            result[-1].merge!({ :type => :rename, :sim => $1.to_i, :file => $3, :file_orig => $2 })
           when /^C(\d+)\t(.+)\t(.+)/ # copy
-            result[-1].merge!({ :type => :copy, :sim => $1.to_i, :file => $3, :orig_file => $2 })
+            result[-1].merge!({ :type => :copy, :sim => $1.to_i, :file => $3, :file_orig => $2 })
           end
         end
       end
@@ -95,7 +95,7 @@ module SuperBlame
             commits[$1] ||= { :id => $1 }
             current = { :commit => commits[$1], :line_orig => $2.to_i, :line_current => $3.to_i }
           when /^([-a-z]+) (.*)/ # attribute
-            current[:commit][$1] = $2
+            current[:commit][$1.to_sym] = $2
           when /^\t(.*)/ # line
             current[:body] = $1
             result << current.dup
@@ -133,8 +133,10 @@ module SuperBlame
     def replace_sub(tree, segs, blob)
       return blob if segs.empty?
       entries = git_ls_tree(tree)
-      entries.select {|e| e[:path] == segs[0] }.each do |e|
-        e[:id] = replace_sub(e[:id], segs.drop(1), blob)
+      entries.select {|e| e[:name] == segs[0] }.each do |e|
+        id = replace_sub(e[:id], segs.drop(1), blob)
+        #puts "replace id: #{} -> #{id}"
+        e[:id] = id
       end
       git_mktree(entries)
     end
@@ -142,14 +144,38 @@ module SuperBlame
     def extract_tracespec(file)
       git_log(file).select {|c| [:rename, :copy].include?(c[:type]) }
     end
-  end
 
-  class Blamer
+    def find_blob_id(commit, path)
+      git_ls_tree("-r", "#{commit}^{tree}").find {|e| e[:name] == path }[:id]
+    end
+
+    def superblame(file, rev, tracespec=nil)
+      tracespec ||= extract_tracespec(file)
+      superblame_sub(file, rev, tracespec).each do |line|
+        orig_annotation = line[:commit_orig] ? line[:commit_orig][:id][0, 7] + " ->" : "          "
+        puts "#{orig_annotation} #{line[:commit][:id][0, 7]} #{line[:body]}"
+      end
+    end
+    def superblame_sub(file, rev, tracespec)
+      git_blame(file, rev).map do |line|
+        spec = tracespec.find {|s| s[:commit] == line[:commit][:id] && s[:file] == line[:commit][:filename] }
+        if spec
+          blob = find_blob_id(line[:commit][:id], line[:commit][:filename])
+          new_commit = replace(spec[:commit_orig], spec[:file_orig], blob)
+          new_lines = superblame_sub(spec[:file_orig], new_commit, tracespec)
+          new_line = new_lines[line[:line_orig] - 1]
+          new_line[:commit_orig] = line[:commit]
+          new_line[:commit] = line[:commit] if new_line[:commit][:id] == new_commit
+          new_line
+        else
+          line
+        end
+      end
+    end
   end
 end
 
-orig_repo = ARGV.shift
+orig_repo, file, rev = *ARGV
 SuperBlame::Repo.new(orig_repo).clone do |repo|
-  #repo.extract_tracespec(ARGV.shift).each {|e| p e }
-  repo.git_blame(ARGV.shift, ARGV.shift).each {|e| p e }
+  repo.superblame(file, rev)
 end
