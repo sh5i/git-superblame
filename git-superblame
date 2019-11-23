@@ -1,0 +1,103 @@
+#!/usr/bin/env ruby
+require 'tmpdir'
+require 'fileutils'
+
+CMD = File.basename($0)
+
+module SuperBlame
+  class BasicRepo
+    def initialize(repo)
+      @repo = repo
+      @env = { "GIT_DIR" => @repo }
+    end
+
+    def inspect
+      %Q[<#{self.class} @repo="#{@repo}">]
+    end
+
+    def git_clone(target)
+      system("git", "clone", "--quiet", "--shared", "--bare", @repo, target)
+    end
+
+    def git_cat_file(id)
+      IO.popen(@env, ["git", "cat-file", id]) do |p|
+        return p.read
+      end
+    end
+
+    def git_hash_object(data)
+      IO.popen(@env, ["git", "hash-object", "-w", "--stdin"], "r+") do |p|
+        p.write(data)
+        p.close_write
+        return p.gets.strip
+      end
+    end
+    
+    def git_ls_tree(tree)
+      IO.popen(@env, ["git", "ls-tree", "-z", tree], "r") do |pin|
+        return pin.each_line("\0").map do |line|
+          # <mode> SP <type> SP <object> TAB <file>
+          m = line.chomp("\0").match(/^(?<mode>\w+) (?<type>\w+) (?<id>\w+)\t(?<name>.*)/m)
+          Hash[ m.names.map {|k| [k.to_sym, m[k]] } ]
+        end
+      end
+    end
+
+    def git_mktree(entries)
+      IO.popen(@env, ["git", "mktree", "-z"], "r+") do |pout|
+        entries.each do |e|
+          pout.print("#{e[:mode]} #{e[:type]} #{e[:id]}\t#{e[:name]}\0")
+        end
+        pout.close_write
+        return pout.gets.strip
+      end
+    end
+
+    def git_commit_tree(tree, parent)
+      IO.popen(@env, ["git", "commit-tree", tree, "-p", parent, "-m", "auto-created by #{CMD}"], "r") do |pin|
+        return pin.gets.strip
+      end
+    end
+
+    def delete
+      FileUtils.rm_rf(@repo)
+    end
+  end
+
+  class Repo < BasicRepo
+    # Make a temprary clone of a repository on TMPDIR
+    def clone
+      tmpdir = Dir.mktmpdir(CMD)  # `mktemp -d -t #{CMD}`
+      git_clone(tmpdir)
+      new_repo = Repo.new(tmpdir)
+      return new_repo unless block_given?
+      begin
+        yield new_repo
+      ensure
+        new_repo.delete
+      end
+    end
+
+    # Replace the contents of a file of a commit to the given blob
+    def replace(commit, path, blob)
+      new_tree = replace_sub("#{commit}^{tree}", path.split('/'), blob)
+      git_commit_tree(new_tree, commit)
+    end
+    def replace_sub(tree, segs, blob)
+      return blob if segs.empty?
+      entries = git_ls_tree(tree)
+      entries.select {|e| e[:path] == segs[0] }.each do |e|
+        e[:id] = replace_sub(e[:id], segs.drop(1), blob)
+      end
+      git_mktree(entries)
+    end
+  end
+
+  class Blamer
+  end
+end
+
+orig_repo = ARGV.shift
+SuperBlame::Repo.new(orig_repo).clone do |repo|
+  p repo
+end
