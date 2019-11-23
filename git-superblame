@@ -59,6 +59,31 @@ module SuperBlame
       end
     end
 
+    FOLLOW = %w[--follow -M -C --find-copies-harder]
+
+    def git_log(file)
+      result = []
+      IO.popen(@env, ["git", "--no-pager", "log", "--format=%H %P", "--name-status", *FOLLOW, "--", file]) do |pin|
+        pin.each_line do |line|
+          case line
+          when /^([0-9a-f]+) ([0-9a-f]+)/ # %H:commit hash, %P:parent hashes
+            result << { :commit => $1, :orig_commit => $2 }
+          when /^A\t(.+)/ # add
+            result[-1].merge!({ :type => :add, :file => $1 })
+          when /^D\t(.+)/ # delete
+            result[-1].merge!({ :type => :delete, :orig_file => $1 })
+          when /^M\t(.+)/ # modify
+            result[-1].merge!({ :type => :modify, :file => $1 })
+          when /^R(\d+)\t(.+)\t(.+)/ # rename
+            result[-1].merge!({ :type => :rename, :sim => $1.to_i, :file => $3, :orig_file => $2 })
+          when /^C(\d+)\t(.+)\t(.+)/ # copy
+            result[-1].merge!({ :type => :copy, :sim => $1.to_i, :file => $3, :orig_file => $2 })
+          end
+        end
+      end
+      result
+    end
+
     def delete
       FileUtils.rm_rf(@repo)
     end
@@ -91,6 +116,10 @@ module SuperBlame
       end
       git_mktree(entries)
     end
+
+    def extract_tracespec(file)
+      git_log(file).select {|c| [:rename, :copy].include?(c[:type]) }
+    end
   end
 
   class Blamer
@@ -99,5 +128,5 @@ end
 
 orig_repo = ARGV.shift
 SuperBlame::Repo.new(orig_repo).clone do |repo|
-  p repo
+  repo.extract_tracespec(ARGV.shift).each {|e| p e }
 end
